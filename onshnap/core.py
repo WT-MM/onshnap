@@ -5,7 +5,7 @@ import logging
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Self, TypedDict, cast
+from typing import Literal, Self, TypedDict, cast
 
 import numpy as np
 
@@ -13,6 +13,9 @@ from .client import DocumentInfo, OnshapeClient
 from .utils import matrix_to_rpy, sanitize_name
 
 logger = logging.getLogger(__name__)
+
+
+OutputFormat = Literal["urdf", "mjcf"]
 
 
 class OccurrenceDict(TypedDict, total=False):
@@ -68,13 +71,23 @@ class AssemblyDict(TypedDict, total=False):
 
 @dataclass
 class ExportConfig:
-    """Configuration for URDF export."""
+    """Configuration for export.
+
+    Attributes:
+        url: Onshape document URL
+        output_dir: Directory to save output files
+        mesh_dir: Subdirectory name for mesh files
+        output_name: Base name for output files (without extension)
+        units: Units for mesh export ("meter" or "inch")
+        filetype: Output format ("urdf" or "mjcf")
+    """
 
     url: str
     output_dir: Path = field(default_factory=lambda: Path("."))
     mesh_dir: str = "meshes"
     output_name: str = "onshnap"
     units: str = "meter"
+    filetype: OutputFormat = "urdf"
 
     @classmethod
     def from_json(cls, path: Path) -> Self:
@@ -82,12 +95,17 @@ class ExportConfig:
         with open(path) as f:
             data = json.load(f)
 
+        filetype = data.get("filetype", "urdf")
+        if filetype not in OutputFormat.__args__:  # type: ignore[attr-defined]
+            raise ValueError(f"Invalid filetype: {filetype}. Must be one of: {OutputFormat}")
+
         return cls(
             url=data["url"],
             output_dir=path.parent,
             mesh_dir=data.get("mesh_dir", "meshes"),
             output_name=data.get("output_name", "onshnap"),
             units=data.get("units", "meter"),
+            filetype=filetype,
         )
 
 
@@ -129,20 +147,22 @@ class PartOccurrence:
     # Stored as 9-element list [Ixx, Ixy, Ixz, Iyx, Iyy, Iyz, Izx, Izy, Izz]
     inertia: list[float] | None = None
 
-    @property
-    def unique_id(self) -> str:
-        """Generate a unique ID for this occurrence based on its path."""
-        return "_".join(self.path)
+    # Enumeration number (1-based) for duplicate names, None if unique
+    enumeration: int | None = None
 
     @property
     def link_name(self) -> str:
         """Generate a sanitized link name for URDF."""
-        return sanitize_name(f"link_{self.name}_{self.unique_id}")
+        if self.enumeration is not None:
+            return sanitize_name(f"link_{self.name}_{self.enumeration}")
+        return sanitize_name(f"link_{self.name}")
 
     @property
     def mesh_filename(self) -> str:
         """Generate a sanitized mesh filename."""
-        return sanitize_name(f"{self.name}_{self.unique_id}") + ".stl"
+        if self.enumeration is not None:
+            return sanitize_name(f"{self.name}_{self.enumeration}") + ".stl"
+        return sanitize_name(f"{self.name}") + ".stl"
 
 
 def parse_occurrences(
@@ -185,6 +205,34 @@ def parse_occurrences(
 
     result = []
 
+    # First pass: count occurrences by name to determine if enumeration is needed
+    name_counts: dict[str, int] = {}
+    for occ in occurrences:
+        path = occ.get("path", [])
+        if not path:
+            continue
+
+        final_instance_id = path[-1]
+        instance = instance_map.get(final_instance_id, {})
+
+        part_doc_id = instance.get("documentId", doc.document_id)
+        part_element_id = instance.get("elementId", "")
+        part_id = instance.get("partId", "")
+
+        if not part_element_id or not part_id:
+            if instance.get("type") == "Assembly":
+                continue
+            continue
+
+        part_key = (part_doc_id, part_element_id, part_id)
+        part_info = part_map.get(part_key, {})
+        part_name = instance.get("name", part_info.get("name", f"part_{final_instance_id}"))
+
+        name_counts[part_name] = name_counts.get(part_name, 0) + 1
+
+    # Second pass: assign enumeration numbers and create PartOccurrence objects
+    name_counters: dict[str, int] = {}
+
     for occ in occurrences:
         path = occ.get("path", [])
         transform_list = occ.get("transform", [])
@@ -225,6 +273,12 @@ def parse_occurrences(
         part_key = (part_doc_id, part_element_id, part_id)
         part_info = part_map.get(part_key, {})
         part_name = instance.get("name", part_info.get("name", f"part_{final_instance_id}"))
+
+        # Assign enumeration if there are multiple occurrences with the same name
+        enumeration: int | None = None
+        if name_counts.get(part_name, 0) > 1:
+            name_counters[part_name] = name_counters.get(part_name, 0) + 1
+            enumeration = name_counters[part_name]
 
         # Get configuration
         configuration = instance.get("configuration", "")
@@ -369,6 +423,7 @@ def parse_occurrences(
                 mass=mass,
                 center_of_mass=center_of_mass,
                 inertia=inertia,
+                enumeration=enumeration,
             )
         )
 
@@ -505,7 +560,10 @@ def generate_urdf(
         # The joint origin is the world transform of the part
         xyz, rpy = matrix_to_rpy(part.transform)
 
-        joint_name = sanitize_name(f"joint_{part.name}_{part.unique_id}")
+        if part.enumeration is not None:
+            joint_name = sanitize_name(f"joint_{part.name}_{part.enumeration}")
+        else:
+            joint_name = sanitize_name(f"joint_{part.name}")
         joint = ET.SubElement(robot, "joint", name=joint_name, type="fixed")
         ET.SubElement(joint, "parent", link="base_link")
         ET.SubElement(joint, "child", link=part.link_name)
@@ -533,6 +591,193 @@ def indent_xml(elem: ET.Element, level: int = 0) -> None:
             child.tail = indent
     elif level and (not elem.tail or not elem.tail.strip()):
         elem.tail = indent
+
+
+def convert_urdf_to_mjcf(urdf_path: Path, mjcf_path: Path, mesh_dir: str = "meshes") -> None:
+    """Convert a URDF file to MJCF format.
+
+    This is a basic converter that handles the frozen-snapshot structure:
+    - All links are bodies in MJCF
+    - Fixed joints become welds
+    - Visual/collision meshes are converted to MJCF geometry
+
+    Args:
+        urdf_path: Path to input URDF file
+        mjcf_path: Path to output MJCF file
+        mesh_dir: Relative path to mesh directory
+    """
+    # Parse URDF
+    urdf_tree = ET.parse(urdf_path)
+    urdf_root = urdf_tree.getroot()
+
+    # Create MJCF root
+    mjcf = ET.Element("mujoco", model=urdf_root.get("name", "robot"))
+
+    # Add compiler options
+    compiler = ET.SubElement(mjcf, "compiler")
+    compiler.set("angle", "radian")
+    compiler.set("coordinate", "local")
+    compiler.set("inertiafromgeom", "true")
+
+    # Add option
+    option = ET.SubElement(mjcf, "option")
+    option.set("gravity", "0 0 -9.81")
+    option.set("timestep", "0.002")
+
+    # Add asset (for meshes)
+    asset = ET.SubElement(mjcf, "asset")
+
+    # Add worldbody
+    worldbody = ET.SubElement(mjcf, "worldbody")
+
+    # Process all links from URDF
+    links = urdf_root.findall("link")
+    base_link = None
+    other_links = []
+
+    for link in links:
+        link_name = link.get("name", "")
+        if link_name == "base_link":
+            base_link = link
+        else:
+            other_links.append(link)
+
+    # Add base_link geometry directly to worldbody (worldbody cannot have attributes)
+    if base_link is not None:
+        # Process base_link visual/collision directly in worldbody
+        _add_link_geometry_to_body(base_link, worldbody, asset, mesh_dir, urdf_path.parent)
+
+    # Add all other links as bodies, connected via welds (fixed joints)
+    for link in other_links:
+        link_name = link.get("name", "")
+        body = ET.SubElement(worldbody, "body", name=link_name)
+
+        # Find the joint that connects this link to base_link
+        joint = None
+        for j in urdf_root.findall("joint"):
+            child_elem = j.find("child")
+            if child_elem is not None and child_elem.get("link") == link_name:
+                joint = j
+                break
+
+        # Set body pose from joint origin
+        if joint is not None:
+            origin = joint.find("origin")
+            if origin is not None:
+                xyz = origin.get("xyz", "0 0 0").split()
+                rpy = origin.get("rpy", "0 0 0").split()
+                body.set("pos", " ".join(xyz))
+                # Convert RPY to quaternion for MJCF (simplified - using euler for now)
+                # MJCF uses quaternions, but we can use euler attribute
+                body.set("euler", " ".join(rpy))
+
+        # Add geometry from link
+        _add_link_geometry_to_body(link, body, asset, mesh_dir, urdf_path.parent)
+
+    # Pretty print and save
+    indent_xml(mjcf)
+    mjcf_tree = ET.ElementTree(mjcf)
+    mjcf_tree.write(mjcf_path, encoding="unicode", xml_declaration=True)
+
+
+def _add_link_geometry_to_body(
+    link: ET.Element, body: ET.Element, asset: ET.Element, mesh_dir: str, base_path: Path
+) -> None:
+    """Add visual and collision geometry from a URDF link to an MJCF body.
+
+    Args:
+        link: URDF link element
+        body: MJCF body element to add geometry to
+        asset: MJCF asset element for mesh definitions
+        mesh_dir: Relative path to mesh directory
+        base_path: Base path for resolving mesh file paths
+    """
+    link_name = link.get("name", "")
+
+    # Process visual elements
+    for visual in link.findall("visual"):
+        geometry = visual.find("geometry")
+        if geometry is not None:
+            mesh_elem = geometry.find("mesh")
+            if mesh_elem is not None:
+                mesh_filename = mesh_elem.get("filename", "")
+                # Keep mesh path relative to MJCF file location
+                # The mesh_filename is already relative to the URDF, so use it as-is
+
+                # Add mesh to asset if not already present
+                mesh_name = f"{link_name}_mesh"
+                existing_mesh = asset.find(f"mesh[@name='{mesh_name}']")
+                if existing_mesh is None:
+                    mesh_asset = ET.SubElement(asset, "mesh")
+                    mesh_asset.set("name", mesh_name)
+                    # Use relative path from MJCF file
+                    mesh_asset.set("file", mesh_filename)
+
+                # Add geometry to body
+                geom = ET.SubElement(body, "geom")
+                geom.set("type", "mesh")
+                geom.set("mesh", mesh_name)
+
+                # Add material/color if available
+                material = visual.find("material")
+                if material is not None:
+                    color_elem = material.find("color")
+                    if color_elem is not None:
+                        rgba = color_elem.get("rgba", "0.5 0.5 0.5 1.0")
+                        geom.set("rgba", rgba)
+
+    # Process collision elements (add as separate geoms with contype/conaffinity)
+    for collision in link.findall("collision"):
+        geometry = collision.find("geometry")
+        if geometry is not None:
+            mesh_elem = geometry.find("mesh")
+            if mesh_elem is not None:
+                mesh_filename = mesh_elem.get("filename", "")
+
+                mesh_name = f"{link_name}_collision_mesh"
+                existing_mesh = asset.find(f"mesh[@name='{mesh_name}']")
+                if existing_mesh is None:
+                    mesh_asset = ET.SubElement(asset, "mesh")
+                    mesh_asset.set("name", mesh_name)
+                    # Use relative path from MJCF file
+                    mesh_asset.set("file", mesh_filename)
+
+                geom = ET.SubElement(body, "geom")
+                geom.set("type", "mesh")
+                geom.set("mesh", mesh_name)
+                geom.set("contype", "1")
+                geom.set("conaffinity", "1")
+                geom.set("rgba", "0.5 0.5 0.5 0.0")  # Invisible collision
+
+    # Add inertial properties if available (skip for worldbody)
+    # Note: In MJCF, mass and inertia must be in an <inertial> child element
+    # Worldbody cannot have inertial properties
+    if body.tag != "worldbody":
+        inertial = link.find("inertial")
+        if inertial is not None:
+            mass_elem = inertial.find("mass")
+            inertia_elem = inertial.find("inertia")
+            origin = inertial.find("origin")
+
+            # Only create inertial element if we have mass or inertia data
+            if mass_elem is not None or inertia_elem is not None:
+                inertial_mjcf = ET.SubElement(body, "inertial")
+
+                if mass_elem is not None:
+                    mass_value = mass_elem.get("value", "0")
+                    inertial_mjcf.set("mass", mass_value)
+
+                # Center of mass position
+                if origin is not None:
+                    xyz = origin.get("xyz", "0 0 0")
+                    inertial_mjcf.set("pos", xyz)
+
+                if inertia_elem is not None:
+                    # MJCF uses diaginertia (diagonal elements only)
+                    ixx = inertia_elem.get("ixx", "0")
+                    iyy = inertia_elem.get("iyy", "0")
+                    izz = inertia_elem.get("izz", "0")
+                    inertial_mjcf.set("diaginertia", f"{ixx} {iyy} {izz}")
 
 
 def download_meshes(
@@ -642,11 +887,11 @@ def run_export(target_dir: str | Path) -> Path:
     logger.info("Downloading meshes to %s...", mesh_dir)
     download_meshes(client, parts, mesh_dir, units=config.units)
 
-    # Generate URDF
+    # Generate URDF (always generate URDF first, then convert if needed)
     logger.info("Generating URDF...")
     urdf_root = generate_urdf(config.output_name, parts, mesh_dir=config.mesh_dir)
 
-    # Pretty print and save
+    # Pretty print and save URDF
     indent_xml(urdf_root)
     urdf_path = config.output_dir / f"{config.output_name}.urdf"
 
@@ -655,12 +900,23 @@ def run_export(target_dir: str | Path) -> Path:
 
     logger.info("URDF saved to %s", urdf_path)
 
+    # Convert to MJCF if requested
+    output_path = urdf_path
+    if config.filetype == "mjcf":
+        logger.info("Converting URDF to MJCF...")
+        mjcf_path = config.output_dir / f"{config.output_name}.mjcf"
+        convert_urdf_to_mjcf(urdf_path, mjcf_path, mesh_dir=config.mesh_dir)
+        logger.info("MJCF saved to %s", mjcf_path)
+        output_path = mjcf_path
+
     # Summary
     logger.info("=" * 60)
     logger.info("Export complete!")
-    logger.info("  URDF: %s", urdf_path)
+    logger.info("  Output: %s", output_path)
+    if config.filetype == "mjcf":
+        logger.info("  URDF: %s (intermediate)", urdf_path)
     logger.info("  Meshes: %s (%d files)", mesh_dir, len(parts))
     logger.info("  Parts: %d", len(parts))
     logger.info("=" * 60)
 
-    return urdf_path
+    return output_path
