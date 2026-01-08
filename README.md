@@ -2,20 +2,27 @@
 
 `onshnap` exports Onshape assemblies as static URDF or MJCF files with STL meshes. Takes a frozen snapshot of the assembly and exports it as a fixed robot description file.
 
-## Features
+Specifically, it exports assemblies as static robot descriptions (no kinematic chains) with star topology (all parts connected to a single base_link via fixed joints).
 
-- **Frozen Snapshot Export**: Exports assemblies as static robot descriptions (no kinematic chains)
-- **Star Topology**: All parts connected to a single base_link via fixed joints
-- **Multiple Formats**: Supports URDF and MJCF output formats
-- **Color Support**: Extracts and preserves part colors from Onshape
-- **Mass Properties**: Extracts mass and inertia information when available
+It also supports exporting to MJCF if you want to do that for some reason. 
+
+
 
 ### Usage
+
+First install the package:
+```bash
+pip install onshnap
+```
+
+Then set your Onshape API keys in your environment and run the export:
 ```bash
 export ONSHAPE_ACCESS_KEY="your-access-key"
 export ONSHAPE_SECRET_KEY="your-secret-key"
 onshnap /path/to/directory/with/config
 ```
+
+To find where to get your Onshape API keys, see the [Onshape Help Center](https://cad.onshape.com/help/Content/Plans/developer-myaccount.htm).
 
 ### Configuration
 The config.json should contain:
