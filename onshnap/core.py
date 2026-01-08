@@ -119,6 +119,16 @@ class PartOccurrence:
     # Color (RGBA, 0-255 range)
     color: tuple[int, int, int, int] | None = None
 
+    # Mass in kg (None if not available)
+    mass: float | None = None
+
+    # Center of mass in part frame (x, y, z) in meters
+    center_of_mass: tuple[float, float, float] | None = None
+
+    # Inertia matrix (3x3) in part frame, kg*m²
+    # Stored as 9-element list [Ixx, Ixy, Ixz, Iyx, Iyy, Iyz, Izx, Izy, Izz]
+    inertia: list[float] | None = None
+
     @property
     def unique_id(self) -> str:
         """Generate a unique ID for this occurrence based on its path."""
@@ -219,8 +229,12 @@ def parse_occurrences(
         # Get configuration
         configuration = instance.get("configuration", "")
 
-        # Try to fetch color from metadata if client is provided
+        # Try to fetch color, mass, and inertia from Onshape if client is provided
         color: tuple[int, int, int, int] | None = None
+        mass: float | None = None
+        center_of_mass: tuple[float, float, float] | None = None
+        inertia: list[float] | None = None
+
         if client is not None:
             logger.debug("Fetching color for part %s", part_name)
             try:
@@ -260,6 +274,86 @@ def parse_occurrences(
             except Exception as e:
                 logger.warning("Could not fetch color for part %s: %s", part_name, e)
 
+            # Fetch mass properties for mass, inertia, and center of mass
+            try:
+                mass_props = client.get_part_mass_properties(
+                    document_id=part_doc_id,
+                    workspace_type=doc.workspace_type,
+                    workspace_id=doc.workspace_id,
+                    element_id=part_element_id,
+                    part_id=part_id,
+                    configuration=configuration,
+                )
+
+                # Extract mass properties from the body
+                bodies = mass_props.get("bodies", {})
+                body = bodies.get(part_id, {})
+                if not body and bodies:
+                    # If part_id not found, try first body
+                    body = list(bodies.values())[0] if bodies else {}
+
+                if body:
+                    # Extract mass (first element of mass array)
+                    mass_list = body.get("mass", [])
+                    if mass_list and len(mass_list) > 0:
+                        mass_value = float(mass_list[0])
+                        if mass_value > 0:
+                            mass = mass_value
+                            logger.debug("Found mass for part %s: %.6f kg", part_name, mass)
+                        else:
+                            logger.warning(
+                                "Part %s has zero or negative mass (%.6f kg). "
+                                "Setting to massless (0.0 kg) - assign a material in Onshape.",
+                                part_name,
+                                mass_value,
+                            )
+                    else:
+                        has_mass = body.get("hasMass", False)
+                        if not has_mass:
+                            logger.warning(
+                                "Part %s has no mass assigned (hasMass=false). "
+                                "Setting to massless (0.0 kg) - assign a material in Onshape for accurate physics.",
+                                part_name,
+                            )
+
+                    # Extract center of mass
+                    centroid = body.get("centroid", [])
+                    if centroid and len(centroid) >= 3:
+                        center_of_mass = (float(centroid[0]), float(centroid[1]), float(centroid[2]))
+                        logger.debug(
+                            "Found center of mass for part %s: (%.6f, %.6f, %.6f) m",
+                            part_name,
+                            center_of_mass[0],
+                            center_of_mass[1],
+                            center_of_mass[2],
+                        )
+
+                    # Extract inertia matrix (9 elements for 3x3 matrix)
+                    inertia_list = body.get("inertia", [])
+                    if inertia_list and len(inertia_list) >= 9:
+                        inertia = [float(x) for x in inertia_list[:9]]
+                        logger.debug("Found inertia matrix for part %s", part_name)
+                    elif inertia_list:
+                        logger.warning(
+                            "Part %s has incomplete inertia data (%d elements, expected 9). "
+                            "Using minimal inertia values.",
+                            part_name,
+                            len(inertia_list),
+                        )
+                else:
+                    logger.warning(
+                        "No mass properties found for part %s. "
+                        "Setting to massless (0.0 kg) - physics simulation may be inaccurate.",
+                        part_name,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Could not fetch mass properties for part %s: %s. "
+                    "Setting to massless (0.0 kg) - physics simulation may be inaccurate.",
+                    part_name,
+                    e,
+                )
+
         result.append(
             PartOccurrence(
                 path=path,
@@ -272,6 +366,9 @@ def parse_occurrences(
                 name=part_name,
                 configuration=configuration,
                 color=color,
+                mass=mass,
+                center_of_mass=center_of_mass,
+                inertia=inertia,
             )
         )
 
@@ -334,9 +431,6 @@ def generate_urdf(
                 f"{part.color[0] / 255.0:.3f} {part.color[1] / 255.0:.3f} "
                 f"{part.color[2] / 255.0:.3f} {part.color[3] / 255.0:.3f}",
             )
-        else:
-            breakpoint()
-            logger.warning("No color found for part %s", part.name)
 
         # Add collision geometry (same as visual)
         collision = ET.SubElement(link, "collision")
@@ -344,20 +438,68 @@ def generate_urdf(
         col_geometry = ET.SubElement(collision, "geometry")
         ET.SubElement(col_geometry, "mesh", filename=mesh_path)
 
-        # Add minimal inertial (required by many simulators)
+        # Add inertial properties (use actual values if available, otherwise massless with warning)
         inertial = ET.SubElement(link, "inertial")
-        ET.SubElement(inertial, "mass", value="0.1")
-        ET.SubElement(inertial, "origin", xyz="0 0 0", rpy="0 0 0")
-        ET.SubElement(
-            inertial,
-            "inertia",
-            ixx="0.0001",
-            ixy="0",
-            ixz="0",
-            iyy="0.0001",
-            iyz="0",
-            izz="0.0001",
-        )
+
+        # Use actual mass if available, otherwise set to 0.0 (massless)
+        if part.mass is not None and part.mass > 0:
+            mass_value = part.mass
+        else:
+            mass_value = 0.0
+
+        ET.SubElement(inertial, "mass", value=f"{mass_value:.6f}")
+
+        # Set center of mass origin (use actual CoM if available, otherwise origin)
+        if part.center_of_mass is not None:
+            com_xyz = f"{part.center_of_mass[0]:.6f} {part.center_of_mass[1]:.6f} {part.center_of_mass[2]:.6f}"
+        else:
+            com_xyz = "0 0 0"
+            if mass_value > 0:
+                logger.warning(
+                    "Part %s has mass but no center of mass data. Using origin (0, 0, 0).",
+                    part.name,
+                )
+        ET.SubElement(inertial, "origin", xyz=com_xyz, rpy="0 0 0")
+
+        # Set inertia matrix (use actual values if available, otherwise minimal values)
+        if part.inertia is not None and len(part.inertia) >= 9:
+            # Inertia matrix is stored as [Ixx, Ixy, Ixz, Iyx, Iyy, Iyz, Izx, Izy, Izz]
+            # URDF expects: ixx, ixy, ixz, iyy, iyz, izz (symmetric matrix)
+            ixx = part.inertia[0]
+            ixy = part.inertia[1]
+            ixz = part.inertia[2]
+            iyy = part.inertia[4]  # Skip Iyx (same as Ixy)
+            iyz = part.inertia[5]
+            izz = part.inertia[8]
+
+            # Ensure positive definite (minimum values)
+            min_inertia = 1e-6
+            ixx = max(ixx, min_inertia)
+            iyy = max(iyy, min_inertia)
+            izz = max(izz, min_inertia)
+
+            ET.SubElement(
+                inertial,
+                "inertia",
+                ixx=f"{ixx:.6f}",
+                ixy=f"{ixy:.6f}",
+                ixz=f"{ixz:.6f}",
+                iyy=f"{iyy:.6f}",
+                iyz=f"{iyz:.6f}",
+                izz=f"{izz:.6f}",
+            )
+        else:
+            # Use minimal inertia values (required by simulators)
+            ET.SubElement(
+                inertial,
+                "inertia",
+                ixx="0.000001",
+                ixy="0",
+                ixz="0",
+                iyy="0.000001",
+                iyz="0",
+                izz="0.000001",
+            )
 
         # Create fixed joint from base_link to this part
         # The joint origin is the world transform of the part

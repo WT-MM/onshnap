@@ -491,3 +491,44 @@ class OnshapeClient:
         if not isinstance(result, dict):
             raise ValueError(f"Expected dict from metadata API, got {type(result)}")
         return result
+
+    def get_part_mass_properties(
+        self,
+        document_id: str,
+        workspace_type: str,
+        workspace_id: str,
+        element_id: str,
+        part_id: str,
+        configuration: str = "",
+    ) -> dict[str, Any]:
+        """Get mass properties for a specific part, including mass, inertia, and center of mass.
+
+        Args:
+            document_id: Document ID
+            workspace_type: Workspace type (w, v, m)
+            workspace_id: Workspace ID
+            element_id: Element ID (Part Studio)
+            part_id: Part ID within the Part Studio
+            configuration: Configuration string (optional)
+
+        Returns:
+            Mass properties dictionary with 'bodies' containing mass/inertia data
+        """
+        # URL-encode the part ID (may contain special characters)
+        encoded_part_id = urllib.parse.quote(part_id, safe="")
+
+        path = (
+            f"/api/parts/d/{document_id}/{workspace_type}/{workspace_id}/"
+            f"e/{element_id}/partid/{encoded_part_id}/massproperties"
+        )
+
+        query: dict[str, Any] = {
+            "useMassPropertyOverrides": "true",
+        }
+        if configuration:
+            query["configuration"] = configuration
+
+        result = self.get_json(path, query=query)
+        if not isinstance(result, dict):
+            raise ValueError(f"Expected dict from massproperties API, got {type(result)}")
+        return result
