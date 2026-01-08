@@ -1,8 +1,59 @@
-[tool.black]
+[project]
 
-line-length = 120
-target-version = ["py311"]
-include = '\.pyi?$'
+name = "onshnap"
+description = "Frozen-snapshot URDF/MJCF exporter for Onshape assemblies"
+authors = [
+    { name = "Wesley Maa", email = "wesley.maa@gmail.com" },
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+dependencies = [
+    "requests>=2.28.0",
+    "numpy>=1.21.0",
+    "scipy>=1.7.0",
+    "colorlogging",
+]
+
+[project.urls]
+
+Repository = "https://github.com/WT-MM/onshnap"
+
+[project.optional-dependencies]
+
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+    "types-requests",
+]
+
+[project.scripts]
+
+onshnap = "onshnap.cli:main"
+
+[build-system]
+
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+
+include-package-data = true
+
+[tool.setuptools.packages.find]
+
+where = ["."]
+include = ["onshnap*"]
+
+[tool.setuptools.package-data]
+
+"onshnap" = ["*.py", "*.txt", "py.typed"]
+
+[tool.setuptools.dynamic]
+
+version = {attr = "onshnap.__version__"}
 
 [tool.pytest.ini_options]
 
@@ -35,14 +86,15 @@ namespace_packages = false
 # module = []
 # ignore_missing_imports = true
 
-[tool.isort]
-
-profile = "black"
-
 [tool.ruff]
 
 line-length = 120
 target-version = "py310"
+
+[tool.ruff.format]
+
+quote-style = "double"
+docstring-code-format = true
 
 [tool.ruff.lint]
 

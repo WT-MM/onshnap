@@ -1,1 +1,0 @@
-recursive-include onshnap/ *.py *.txt py.typed MANIFEST.in

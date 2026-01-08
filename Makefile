@@ -23,6 +23,14 @@ all:
 .PHONY: all
 
 # ------------------------ #
+#        Installation      #
+# ------------------------ #
+
+install-dev:
+	@pip install -e ".[dev]"
+.PHONY: install-dev
+
+# ------------------------ #
 #        PyPI Build        #
 # ------------------------ #
 
@@ -46,15 +54,15 @@ exclude_args := $(foreach d,$(excluded),-path "$(d)" -prune -o)
 py-files := $(shell find . $(exclude_args) -name '*.py' -print)
 
 format:
-	@black $(py-files)
 	@ruff format $(py-files)
+	@ruff check --fix $(py-files)
 .PHONY: format
 
 static-checks:
-	@black --diff --check $(py-files)
+	@ruff format --check $(py-files)
 	@ruff check $(py-files)
 	@mypy --install-types --non-interactive $(py-files)
-.PHONY: lint
+.PHONY: static-checks
 
 # ------------------------ #
 #        Unit tests        #
