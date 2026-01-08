@@ -1,6 +1,6 @@
 # mypy: disable-error-code="import-untyped"
 #!/usr/bin/env python
-"""Setup script for the project."""
+"""Setup script for onshnap - Frozen-snapshot URDF exporter for Onshape."""
 
 import re
 
@@ -11,11 +11,15 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 
 with open("onshnap/requirements.txt", "r", encoding="utf-8") as f:
-    requirements: list[str] = f.read().splitlines()
+    requirements: list[str] = [
+        line.strip() for line in f.read().splitlines() if line.strip() and not line.startswith("#")
+    ]
 
 
 with open("onshnap/requirements-dev.txt", "r", encoding="utf-8") as f:
-    requirements_dev: list[str] = f.read().splitlines()
+    requirements_dev: list[str] = [
+        line.strip() for line in f.read().splitlines() if line.strip() and not line.startswith("#")
+    ]
 
 
 with open("onshnap/__init__.py", "r", encoding="utf-8") as fh:
@@ -27,19 +31,31 @@ version: str = version_re.group(1)
 setup(
     name="onshnap",
     version=version,
-    description="The onshnap project",
+    description="Frozen-snapshot URDF exporter for Onshape assemblies",
     author="Wesley Maa",
     url="https://github.com/WT-MM/onshnap.git",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    python_requires=">=3.11",
+    python_requires=">=3.10",
     install_requires=requirements,
     tests_require=requirements_dev,
     extras_require={"dev": requirements_dev},
     packages=find_packages(),
-    # entry_points={
-    #     "console_scripts": [
-    #         "onshnap.cli:main",
-    #     ],
-    # },
+    entry_points={
+        "console_scripts": [
+            "onshnap=onshnap.cli:main",
+        ],
+    },
+    classifiers=[
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Developers",
+        "Intended Audience :: Science/Research",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: OS Independent",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Topic :: Scientific/Engineering",
+    ],
 )

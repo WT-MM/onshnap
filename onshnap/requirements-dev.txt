@@ -1,7 +1,12 @@
 # requirements-dev.txt
 
+# Linting & Formatting
 black
-darglint
-mypy
-pytest
 ruff
+
+# Type checking
+mypy
+types-requests
+
+# Testing
+pytest
