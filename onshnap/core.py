@@ -88,6 +88,7 @@ class ExportConfig:
     output_name: str = "onshnap"
     units: str = "meter"
     filetype: OutputFormat = "urdf"
+    create_centroid_links: bool = False  # If True, create virtual links at center of mass
 
     @classmethod
     def from_json(cls, path: Path) -> Self:
@@ -106,7 +107,20 @@ class ExportConfig:
             output_name=data.get("output_name", "onshnap"),
             units=data.get("units", "meter"),
             filetype=filetype,
+            create_centroid_links=data.get("create_centroid_links", False),
         )
+
+
+@dataclass
+class VirtualLink:
+    """Represents a virtual child link attached to a main part link.
+
+    Virtual links are used to define additional coordinate frames (e.g., centroid)
+    without modifying the main link's mesh placement.
+    """
+
+    name_suffix: str  # e.g., "_centroid"
+    relative_transform: np.ndarray  # 4x4 matrix from Main Link -> Virtual Link
 
 
 @dataclass
@@ -150,6 +164,11 @@ class PartOccurrence:
     # Enumeration number (1-based) for duplicate names, None if unique
     enumeration: int | None = None
 
+    # Virtual links (child links) attached to this part's main link
+    # Used to define additional coordinate frames (e.g., centroid) without
+    # modifying the main link's mesh placement
+    virtual_links: list[VirtualLink] = field(default_factory=list)
+
     @property
     def link_name(self) -> str:
         """Generate a sanitized link name for URDF."""
@@ -170,6 +189,7 @@ def parse_occurrences(
     assembly: AssemblyDict,
     doc: DocumentInfo,
     client: OnshapeClient | None = None,
+    create_centroid_links: bool = False,
 ) -> list[PartOccurrence]:
     """Parse occurrence data from the API into PartOccurrence objects.
 
@@ -178,6 +198,7 @@ def parse_occurrences(
         assembly: Assembly definition (for part metadata)
         doc: Document information
         client: Optional Onshape client for fetching part colors from metadata
+        create_centroid_links: If True, create virtual links at center of mass
 
     Returns:
         List of PartOccurrence objects
@@ -408,6 +429,35 @@ def parse_occurrences(
                     e,
                 )
 
+        # Create virtual links at center of mass if requested
+        virtual_links: list[VirtualLink] = []
+        if create_centroid_links and center_of_mass is not None:
+            # Create translation matrix T_offset from part origin to center of mass
+            # This is the relative transform from the main link to the virtual link
+            t_offset = np.eye(4)
+            t_offset[:3, 3] = np.array(center_of_mass)
+
+            # Create virtual link
+            virtual_link = VirtualLink(
+                name_suffix="_centroid",
+                relative_transform=t_offset.astype(np.float64),
+            )
+            virtual_links.append(virtual_link)
+
+            logger.info(
+                "Created virtual link for part %s at centroid: offset=(%.6f, %.6f, %.6f)",
+                part_name,
+                center_of_mass[0],
+                center_of_mass[1],
+                center_of_mass[2],
+            )
+        elif create_centroid_links and center_of_mass is None:
+            logger.warning(
+                "Part %s: create_centroid_links is True but center of mass data is not available. "
+                "No virtual link will be created.",
+                part_name,
+            )
+
         result.append(
             PartOccurrence(
                 path=path,
@@ -424,6 +474,7 @@ def parse_occurrences(
                 center_of_mass=center_of_mass,
                 inertia=inertia,
                 enumeration=enumeration,
+                virtual_links=virtual_links,
             )
         )
 
@@ -471,6 +522,7 @@ def generate_urdf(
 
         # Add visual geometry
         visual = ET.SubElement(link, "visual")
+        # Main link stays at part origin - no offset needed
         ET.SubElement(visual, "origin", xyz="0 0 0", rpy="0 0 0")
         geometry = ET.SubElement(visual, "geometry")
         mesh_path = f"{mesh_dir}/{part.mesh_filename}"
@@ -489,6 +541,7 @@ def generate_urdf(
 
         # Add collision geometry (same as visual)
         collision = ET.SubElement(link, "collision")
+        # Main link stays at part origin - no offset needed
         ET.SubElement(collision, "origin", xyz="0 0 0", rpy="0 0 0")
         col_geometry = ET.SubElement(collision, "geometry")
         ET.SubElement(col_geometry, "mesh", filename=mesh_path)
@@ -504,7 +557,7 @@ def generate_urdf(
 
         ET.SubElement(inertial, "mass", value=f"{mass_value:.6f}")
 
-        # Set center of mass origin (use actual CoM if available, otherwise origin)
+        # Set center of mass origin (main link stays at part origin)
         if part.center_of_mass is not None:
             com_xyz = f"{part.center_of_mass[0]:.6f} {part.center_of_mass[1]:.6f} {part.center_of_mass[2]:.6f}"
         else:
@@ -573,6 +626,51 @@ def generate_urdf(
             xyz=f"{xyz[0]:.8f} {xyz[1]:.8f} {xyz[2]:.8f}",
             rpy=f"{rpy[0]:.8f} {rpy[1]:.8f} {rpy[2]:.8f}",
         )
+
+        # Create virtual links (star topology - connected directly to base_link)
+        for vlink in part.virtual_links:
+            # Create virtual link name
+            virtual_link_name = sanitize_name(f"{part.link_name}{vlink.name_suffix}")
+
+            # Create the virtual link (dummy link with no geometry)
+            virtual_link = ET.SubElement(robot, "link", name=virtual_link_name)
+
+            # Add minimal inertial properties (required by URDF)
+            virtual_inertial = ET.SubElement(virtual_link, "inertial")
+            ET.SubElement(virtual_inertial, "mass", value="0.000001")
+            ET.SubElement(virtual_inertial, "origin", xyz="0 0 0", rpy="0 0 0")
+            ET.SubElement(
+                virtual_inertial,
+                "inertia",
+                ixx="0.000000001",
+                ixy="0",
+                ixz="0",
+                iyy="0.000000001",
+                iyz="0",
+                izz="0.000000001",
+            )
+
+            # Calculate world transform for virtual link: T_world_virtual = T_world_part @ T_part_virtual
+            virtual_world_transform = part.transform @ vlink.relative_transform
+
+            # Create fixed joint from base_link to virtual link (star topology)
+            if part.enumeration is not None:
+                virtual_joint_name = sanitize_name(f"joint_{part.name}_{part.enumeration}{vlink.name_suffix}")
+            else:
+                virtual_joint_name = sanitize_name(f"joint_{part.name}{vlink.name_suffix}")
+
+            virtual_joint = ET.SubElement(robot, "joint", name=virtual_joint_name, type="fixed")
+            ET.SubElement(virtual_joint, "parent", link="base_link")
+            ET.SubElement(virtual_joint, "child", link=virtual_link_name)
+
+            # Convert world transform to XYZ/RPY for the joint origin
+            vlink_xyz, vlink_rpy = matrix_to_rpy(virtual_world_transform)
+            ET.SubElement(
+                virtual_joint,
+                "origin",
+                xyz=f"{vlink_xyz[0]:.8f} {vlink_xyz[1]:.8f} {vlink_xyz[2]:.8f}",
+                rpy=f"{vlink_rpy[0]:.8f} {vlink_rpy[1]:.8f} {vlink_rpy[2]:.8f}",
+            )
 
     return robot
 
@@ -875,7 +973,13 @@ def run_export(target_dir: str | Path) -> Path:
 
     # Parse occurrences
     logger.info("Parsing occurrences...")
-    parts = parse_occurrences(raw_occurrences, cast(AssemblyDict, assembly), doc, client=client)
+    parts = parse_occurrences(
+        raw_occurrences,
+        cast(AssemblyDict, assembly),
+        doc,
+        client=client,
+        create_centroid_links=config.create_centroid_links,
+    )
 
     if not parts:
         raise ValueError("No parts found in assembly. Check that the assembly is not empty.")

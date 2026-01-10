@@ -30,9 +30,9 @@ def matrix_to_rpy(mat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     rot_mat = mat[:3, :3]
 
     # Convert to RPY using scipy
-    # Use 'xyz' (extrinsic) = 'XYZ' Euler angles = roll-pitch-yaw
+    # Use extrinsic = 'XYZ' Euler angles = roll-pitch-yaw
     rotation = R.from_matrix(rot_mat)
-    rpy = rotation.as_euler("xyz", degrees=False)
+    rpy = rotation.as_euler("XYZ", degrees=False)
 
     return xyz, rpy
 
