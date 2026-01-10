@@ -32,7 +32,8 @@ The config.json should contain:
     "filetype": "urdf", // optional, defaults to "urdf"
     "output_name": "onshnap", // optional, defaults to "onshnap"
     "mesh_dir": "meshes", // optional, defaults to "meshes"
-    "units": "meter" // optional, defaults to "meter"
+    "units": "meter", // optional, defaults to "meter"
+    "create_centroid_links": true // optional, defaults to false
 }
 ```
 
@@ -42,3 +43,4 @@ The config.json should contain:
 - `output_name` (optional): Base name for output files (default: `"onshnap"`)
 - `mesh_dir` (optional): Subdirectory name for mesh files (default: `"meshes"`)
 - `units` (optional): Units for mesh export - `"meter"` (default) or `"inch"`
+- `create_centroid_links` (optional): If True, create virtual links at center of mass (default: `false`)
